@@ -69,12 +69,32 @@ const (
 	SiBlockEntry = 1
 )
 
+// maxLocalDescriptorDepth bounds the branch-node (SiBlockEntry) recursion the
+// #47 cherry-pick added. A malicious PST can craft a cyclic or pathologically
+// deep local-descriptor tree; unbounded recursion would overflow the goroutine
+// stack — a FATAL Go runtime error that recover()/safe.Do CANNOT contain (it is
+// not a panic). Real local-descriptor trees are 1–2 levels deep, so 64 is far
+// beyond any legitimate file while cutting off the attack. recall-fork hardening
+// on top of upstream #47: this is an attacker-byte boundary the recall fuzz
+// targets exercise.
+const maxLocalDescriptorDepth = 64
+
 // GetLocalDescriptorsFromIdentifier returns the local descriptors of the local descriptors identifier.
 // References "Local Descriptors".
 func (file *File) GetLocalDescriptorsFromIdentifier(localDescriptorsIdentifier Identifier) ([]LocalDescriptor, error) {
+	return file.getLocalDescriptorsFromIdentifier(localDescriptorsIdentifier, 0)
+}
+
+// getLocalDescriptorsFromIdentifier is the depth-tracked implementation. depth
+// counts branch-node recursion levels and is bounded by maxLocalDescriptorDepth.
+func (file *File) getLocalDescriptorsFromIdentifier(localDescriptorsIdentifier Identifier, depth int) ([]LocalDescriptor, error) {
 	if localDescriptorsIdentifier == 0 {
 		// There are no local descriptors.
 		return nil, nil
+	}
+
+	if depth > maxLocalDescriptorDepth {
+		return nil, ErrLocalDescriptorDepthExceeded
 	}
 
 	localDescriptorsNode, err := file.GetBlockBTreeNode(localDescriptorsIdentifier)
@@ -145,7 +165,7 @@ func (file *File) GetLocalDescriptorsFromIdentifier(localDescriptorsIdentifier I
 		if blockType == SlBlockEntry {
 			localDescriptors = append(localDescriptors, localDescriptor)
 		} else {
-			descriptors, err := file.GetLocalDescriptorsFromIdentifier(localDescriptor.DataIdentifier)
+			descriptors, err := file.getLocalDescriptorsFromIdentifier(localDescriptor.DataIdentifier, depth+1)
 			if err != nil {
 				return nil, eris.Wrap(err, "failed to get descriptors from identifier")
 			}
