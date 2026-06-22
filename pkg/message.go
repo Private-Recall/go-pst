@@ -311,11 +311,15 @@ func (message *Message) GetBodyHTML() (string, error) {
 	case PropertyTypeString:
 		return reader.GetString()
 	case PropertyTypeString8:
+		if s, err := reader.GetString8(message.internetCodepage()); err == nil {
+			return s, nil
+		}
 		return reader.GetString8(1252)
 	default:
 		// PtypBinary (and any non-string form): the raw HTML bytes. Treat as
-		// UTF-8 when valid (the common case); otherwise fall back to the
-		// Windows-1252 legacy code page rather than emit invalid UTF-8.
+		// UTF-8 when valid (the common case); otherwise decode using the message's
+		// declared internet code page, then Windows-1252, rather than emit invalid
+		// UTF-8 or drop the body on an unknown code page.
 		data := make([]byte, reader.Size())
 
 		if _, err := reader.ReadAt(data, 0); err != nil {
@@ -326,6 +330,27 @@ func (message *Message) GetBodyHTML() (string, error) {
 			return string(data), nil
 		}
 
-		return reader.DecodeString8(data, 1252)
+		if s, err := reader.DecodeString8(data, message.internetCodepage()); err == nil {
+			return s, nil
+		}
+		if s, err := reader.DecodeString8(data, 1252); err == nil {
+			return s, nil
+		}
+		return string(data), nil
 	}
+}
+
+// internetCodepage returns PidTagInternetCodepage (the code page the body bytes
+// are in), defaulting to Windows-1252 when the property is absent, unreadable,
+// or non-positive.
+func (message *Message) internetCodepage() int {
+	reader, err := message.PropertyContext.GetPropertyReader(0x3FDE, message.LocalDescriptors)
+	if err != nil {
+		return 1252
+	}
+	cp, err := reader.GetInteger32()
+	if err != nil || cp <= 0 {
+		return 1252
+	}
+	return int(cp)
 }
