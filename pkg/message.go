@@ -19,6 +19,8 @@ package pst
 import (
 	_ "embed"
 	"fmt"
+	"unicode/utf8"
+
 	"github.com/mooijtech/go-pst/v6/pkg/properties"
 	"github.com/pkg/errors"
 	"github.com/rotisserie/eris"
@@ -285,4 +287,45 @@ func (message *Message) GetBodyRTF() (string, error) {
 	}
 
 	return NewRTFDecoder().Decode(rtfBody)
+}
+
+// GetBodyHTML returns the message's HTML body (PidTagHtml, property 0x1013).
+//
+// Outlook, Exchange and most webmail store this property as PtypBinary — the
+// HTML bytes in the message's internet code page, which is UTF-8 in the
+// overwhelming majority of modern mail — while some senders store it as a
+// Unicode (PtypString) or ANSI (PtypString8) string. The generated
+// properties.Message.GetBodyHtml only maps the Unicode-string form (its msgp key
+// is keyed to PtypString), so a binary HTML body reads back empty there. This
+// reads the property directly and decodes whichever of the three forms is
+// present. Returns the underlying ErrPropertyNotFound (from GetPropertyReader)
+// when the message carries no HTML body.
+func (message *Message) GetBodyHTML() (string, error) {
+	reader, err := message.PropertyContext.GetPropertyReader(4115, message.LocalDescriptors)
+
+	if err != nil {
+		return "", err
+	}
+
+	switch reader.Property.Type {
+	case PropertyTypeString:
+		return reader.GetString()
+	case PropertyTypeString8:
+		return reader.GetString8(1252)
+	default:
+		// PtypBinary (and any non-string form): the raw HTML bytes. Treat as
+		// UTF-8 when valid (the common case); otherwise fall back to the
+		// Windows-1252 legacy code page rather than emit invalid UTF-8.
+		data := make([]byte, reader.Size())
+
+		if _, err := reader.ReadAt(data, 0); err != nil {
+			return "", errors.WithStack(err)
+		}
+
+		if utf8.Valid(data) {
+			return string(data), nil
+		}
+
+		return reader.DecodeString8(data, 1252)
+	}
 }
