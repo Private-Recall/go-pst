@@ -285,6 +285,17 @@ func (propertyReader *PropertyReader) DecodeString8(data []byte, codePageIdentif
 		return "", eris.Wrapf(err, "failed to find IANA encoding: %d", codePageIdentifier)
 	}
 
+	// ianaindex returns (nil, nil) for an encoding whose name it recognizes but
+	// does not implement (e.g. the "ks_c_5601-1987", "gb2312" and "utf-7" names
+	// this package mapped some code pages to). Calling NewDecoder on that nil
+	// Encoding panics with a nil-pointer dereference — which, on a real archive,
+	// aborts the caller mid-message (recall issue: a single such body crashed
+	// GetBodyHTML during a full-archive walk). Return an error instead so the
+	// caller degrades gracefully rather than crashing.
+	if encoding == nil {
+		return "", eris.Wrapf(ErrCodePageUnsupported, "code page %d (%q)", codePageIdentifier, CodePageIdentifierToEncoding[codePageIdentifier])
+	}
+
 	return encoding.NewDecoder().String(string(data))
 }
 

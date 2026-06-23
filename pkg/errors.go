@@ -51,4 +51,5 @@ var (
 	ErrRecipientsNotFound               = errors.New("go-pst: message has no recipient table")
 	ErrBlockIndexNotFound               = errors.New("go-pst: block index not found")
 	ErrTotalBlocksSizeMismatch          = errors.New("go-pst: block total size mismatch")
+	ErrCodePageUnsupported              = errors.New("go-pst: code page recognized but not implemented by golang.org/x/text")
 )

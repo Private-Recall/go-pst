@@ -25,7 +25,7 @@ var CodePageIdentifierToEncoding = map[int]string{
 	1257:  "windows-1257",
 	28592: "iso-8859-2",
 	1250:  "windows-1250",
-	936:   "gb2312",
+	936:   "gbk", // x/text has no "gb2312" encoding (ianaindex returns nil); GBK is its superset and decodes cp936.
 	52936: "hz-gb-2312",
 	54936: "gb18030",
 	950:   "big5",
@@ -41,7 +41,7 @@ var CodePageIdentifierToEncoding = map[int]string{
 	50220: "iso-2022-jp",
 	50221: "csISO2022JP",
 	932:   "iso-2022-jp",
-	949:   "ks_c_5601-1987",
+	949:   "euc-kr", // x/text has no "ks_c_5601-1987" encoding (ianaindex returns nil); its EUC-KR decoder covers cp949/UHC.
 	51949: "euc-kr",
 	28593: "iso-8859-3",
 	28605: "iso-8859-15",
