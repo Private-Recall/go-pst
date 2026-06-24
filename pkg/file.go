@@ -32,6 +32,7 @@ type File struct {
 	NodeBTree      BTreeStore
 	BlockBTree     BTreeStore
 	NameToIDMap    *NameToIDMap
+	Size           int64 // Total file size in bytes (0 if unknown); the hard upper bound on any single value allocation.
 }
 
 // Reader defines the file reader used by go-pst to support asynchronous I/O.
@@ -55,8 +56,13 @@ func NewDefaultReader(reader io.ReaderAt) *DefaultReader {
 
 // New is a constructor for creating PST files.
 // See also NewAsync.
+//
+// A malformed or truncated archive returns an error (including a recovered
+// panic from the decode paths), never a process kill.
 func New(reader io.ReaderAt) (*File, error) {
-	return NewFromReaderWithBTrees(NewDefaultReader(reader), NewBTreeStoreInMemory(), NewBTreeStoreInMemory())
+	return guard("New", func() (*File, error) {
+		return NewFromReaderWithBTrees(NewDefaultReader(reader), NewBTreeStoreInMemory(), NewBTreeStoreInMemory())
+	})
 }
 
 // NewFromReaderWithBTrees is a constructor for creating PST files from a reader using the specified b-tree stores.
@@ -68,6 +74,7 @@ func NewFromReaderWithBTrees(reader Reader, nodeBTree BTreeStore, blockBTree BTr
 		},
 		NodeBTree:  nodeBTree,
 		BlockBTree: blockBTree,
+		Size:       readerSize(reader),
 	}
 
 	isValidSignature, err := pstFile.IsValidSignature()

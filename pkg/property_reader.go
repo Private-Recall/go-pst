@@ -52,7 +52,12 @@ func NewPropertyReader(property Property, heapOnNode *HeapOnNode, file *File, lo
 	case len(property.Data) != 0:
 		return PropertyReader{property, nil, localDescriptors, file}, nil
 	default:
-		return PropertyReader{}, eris.Wrap(ErrPropertyNoData, fmt.Sprintf("Property ID: %x", property.ID))
+		// Return the bare sentinel: Populate hits this for every property with no
+		// inline data and no HNID and discards it via eris.Is(err, ErrPropertyNoData),
+		// so wrapping it (an eris stack capture + Sprintf per property) is pure
+		// overhead — and on a malformed context with many such properties it
+		// dominates the decode time.
+		return PropertyReader{}, ErrPropertyNoData
 	}
 }
 
@@ -186,6 +191,10 @@ func (propertyReader *PropertyReader) GetString() (string, error) {
 		return "", ErrPropertyNoData
 	}
 
+	if err := propertyReader.File.checkAllocSize(propertyReader.Size()); err != nil {
+		return "", err
+	}
+
 	data := make([]byte, propertyReader.Size())
 
 	if _, err := propertyReader.ReadAt(data, 0); err != nil {
@@ -214,6 +223,10 @@ func (propertyReader *PropertyReader) GetString8(codepageIdentifier int) (string
 		return "", ErrPropertyTypeMismatch
 	} else if propertyReader.HeapOnNodeReader == nil || propertyReader.Property.HNID == 0 {
 		return "", ErrPropertyNoData
+	}
+
+	if err := propertyReader.File.checkAllocSize(propertyReader.Size()); err != nil {
+		return "", err
 	}
 
 	data := make([]byte, propertyReader.Size())

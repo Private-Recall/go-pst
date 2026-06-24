@@ -184,14 +184,20 @@ func (folder *Folder) GetSubFolders() ([]Folder, error) {
 type WalkFolderFunc = func(folder *Folder) error
 
 // WalkFolders walks all folders recursively.
+//
+// The whole walk runs under a panic guard, so a malformed sub-folder (or a panic
+// raised inside walkFolderFunc) surfaces as an error rather than crashing the
+// caller.
 func (file *File) WalkFolders(walkFolderFunc WalkFolderFunc) error {
-	rootFolder, err := file.GetRootFolder()
+	return guardVoid("WalkFolders", func() error {
+		rootFolder, err := file.GetRootFolder()
 
-	if err != nil {
-		return eris.Wrap(err, "failed to get root folder")
-	}
+		if err != nil {
+			return eris.Wrap(err, "failed to get root folder")
+		}
 
-	return rootFolder.WalkFolders(walkFolderFunc)
+		return rootFolder.WalkFolders(walkFolderFunc)
+	})
 }
 
 // WalkFolders recursively walks the sub-folders of this folder.
