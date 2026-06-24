@@ -80,7 +80,22 @@ func (file *File) GetPropertyContext(heapOnNode *HeapOnNode) (*PropertyContext, 
 		return nil, eris.Wrap(err, "failed to get key table reader")
 	}
 
-	keyCount := int(keyTableReader.Size()) / int(btreeOnHeapHeader.KeySize+btreeOnHeapHeader.ValueSize)
+	recordSize := int(btreeOnHeapHeader.KeySize) + int(btreeOnHeapHeader.ValueSize)
+
+	if recordSize <= 0 {
+		return nil, eris.New("invalid property-context record size")
+	}
+
+	keyCount := int(keyTableReader.Size()) / recordSize
+
+	// Property IDs are 16-bit, so a property context cannot hold more than 2^16
+	// distinct records. A larger count is malformed; reject it before the loop so
+	// a forged size can't drive a huge append and a costly per-item error path in
+	// Populate. (checkAllocSize already bounds against the file; this is the
+	// tighter, domain-specific ceiling.)
+	if keyCount < 0 || keyCount > 1<<16 {
+		return nil, eris.Errorf("implausible property-context key count %d", keyCount)
+	}
 
 	var properties []Property
 	offset := int64(0)

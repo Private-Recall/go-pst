@@ -176,6 +176,10 @@ func (file *File) GetNameToIDMap() (*NameToIDMap, error) {
 		return nil, eris.Wrap(err, "failed to get entry stream property reader")
 	}
 
+	if err := entryStream.File.checkAllocSize(entryStream.Size()); err != nil {
+		return nil, err
+	}
+
 	entryStreamData := make([]byte, entryStream.Size())
 
 	if _, err := entryStream.ReadAt(entryStreamData, 0); err != nil {
@@ -189,6 +193,10 @@ func (file *File) GetNameToIDMap() (*NameToIDMap, error) {
 
 	if err != nil {
 		return nil, eris.Wrap(err, "failed to get string stream property reader")
+	}
+
+	if err := stringStream.File.checkAllocSize(stringStream.Size()); err != nil {
+		return nil, err
 	}
 
 	stringStreamData := make([]byte, stringStream.Size())

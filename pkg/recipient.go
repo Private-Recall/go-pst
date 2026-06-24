@@ -122,6 +122,10 @@ func (message *Message) GetRecipientTableContext() (*TableContext, error) {
 // left empty) rather than failing the whole message — a malformed recipient
 // row in an attacker-supplied PST must not abort ingest.
 func (message *Message) GetRecipients() ([]Recipient, error) {
+	return guard("GetRecipients", message.getRecipients)
+}
+
+func (message *Message) getRecipients() ([]Recipient, error) {
 	tableContext, err := message.GetRecipientTableContext()
 
 	if eris.Is(err, ErrRecipientsNotFound) {

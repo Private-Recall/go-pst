@@ -150,20 +150,56 @@ func (file *File) GetTableContext(heapOnNode *HeapOnNode, localDescriptors []Loc
 		return TableContext{}, eris.Wrap(err, "failed to get block trailer size")
 	}
 
-	blockCount := int(tableRowMatrixReader.Size()) / (blockSize - blockTrailerSize)
-	rowsPerBlock := (blockSize - blockTrailerSize) / int(binary.LittleEndian.Uint16(rowSize))
+	rowSizeValue := int(binary.LittleEndian.Uint16(rowSize))
 
-	rowCount := (blockCount * rowsPerBlock) + ((int(tableRowMatrixReader.Size()) % (blockSize - blockTrailerSize)) / int(binary.LittleEndian.Uint16(rowSize)))
+	if rowSizeValue <= 0 {
+		return TableContext{}, eris.New("invalid table-context row size")
+	}
+
 	cellExistenceBlockSize := int(math.Ceil(float64(tableColumnCount[0]) / 8))
+
+	// A valid row must be large enough to hold every column's cell plus the cell
+	// existence block. Deriving the minimum row size from the column layout and
+	// rejecting anything smaller keeps a forged row size (e.g. 1) from inflating
+	// the row count: with a realistic row size, total per-table work stays bounded
+	// by the row matrix size rather than blowing up to file-size-many iterations.
+	requiredRowSize := int(binary.LittleEndian.Uint16(tci1b)) + cellExistenceBlockSize
+
+	for _, columnDescriptor := range tableColumnDescriptors {
+		if end := int(columnDescriptor.DataOffset) + int(columnDescriptor.DataSize); end > requiredRowSize {
+			requiredRowSize = end
+		}
+	}
+
+	if rowSizeValue < requiredRowSize {
+		return TableContext{}, eris.Errorf("table-context row size %d is smaller than the %d bytes its columns require", rowSizeValue, requiredRowSize)
+	}
+
+	blockCount := int(tableRowMatrixReader.Size()) / (blockSize - blockTrailerSize)
+	rowsPerBlock := (blockSize - blockTrailerSize) / rowSizeValue
+
+	if rowsPerBlock <= 0 {
+		return TableContext{}, eris.New("invalid table-context rows-per-block")
+	}
+
+	rowCount := (blockCount * rowsPerBlock) + ((int(tableRowMatrixReader.Size()) % (blockSize - blockTrailerSize)) / rowSizeValue)
 
 	startAtRow := 0
 	numberOfRowsToReturn := rowCount
+
+	// A row occupies real bytes in the matrix, so the table cannot hold more rows
+	// than the archive could contain. Bound the row count against the file size
+	// before allocating, so an XBlock-inflated row matrix can't drive a multi-
+	// gigabyte slice allocation.
+	if err := file.checkAllocSize(int64(numberOfRowsToReturn)); err != nil {
+		return TableContext{}, eris.Wrap(err, "implausible table-context row count")
+	}
 
 	var currentRowStartOffset int64
 	tableContextItems := make([][]Property, numberOfRowsToReturn)
 
 	for rowIndex := 0; rowIndex < numberOfRowsToReturn; rowIndex++ {
-		currentRowStartOffset = int64((((startAtRow + rowIndex) / rowsPerBlock) * (blockSize - blockTrailerSize)) + (((startAtRow + rowIndex) % rowsPerBlock) * int(binary.LittleEndian.Uint16(rowSize))))
+		currentRowStartOffset = int64((((startAtRow + rowIndex) / rowsPerBlock) * (blockSize - blockTrailerSize)) + (((startAtRow + rowIndex) % rowsPerBlock) * rowSizeValue))
 		cellExistenceBlock := make([]byte, cellExistenceBlockSize)
 
 		if _, err := tableRowMatrixReader.ReadAt(cellExistenceBlock, currentRowStartOffset+int64(binary.LittleEndian.Uint16(tci1b))); err != nil {

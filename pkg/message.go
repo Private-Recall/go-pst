@@ -105,48 +105,67 @@ func (messageIterator *MessageIterator) Err() error {
 	return messageIterator.err
 }
 
-// Next will ensure that Value returns the next item when executed.
-// If the next value is not retrievable, Next will return false and Err() will return the error cause.
+// Next advances the iterator and reports whether a message is available.
+//
+// Contract: a read failure surfaces via Err() and terminates iteration (Next
+// returns false and does not retry the failed row). A malformed row that yields
+// no message is skipped, never surfaced — so after Next returns true, Value() is
+// always non-nil. A panic in the decode paths is recovered into Err().
 func (messageIterator *MessageIterator) Next() bool {
-	hasNext := len(messageIterator.messageTableContext.Properties) > messageIterator.currentIndex
+	advanced, err := guard("MessageIterator.Next", messageIterator.next)
 
-	if !hasNext {
+	if err != nil {
+		messageIterator.err = err
 		return false
 	}
 
-	var currentMessage *Message
+	return advanced
+}
 
-	for _, property := range messageIterator.messageTableContext.Properties[messageIterator.currentIndex] {
-		// We only return the message identifier in GetMessageTableContext,
-		// so we don't need to check the property ID here.
-		propertyReader, err := messageIterator.messageTableContext.GetPropertyReader(property)
+func (messageIterator *MessageIterator) next() (bool, error) {
+	for messageIterator.currentIndex < len(messageIterator.messageTableContext.Properties) {
+		row := messageIterator.messageTableContext.Properties[messageIterator.currentIndex]
 
-		if err != nil {
-			messageIterator.err = eris.Wrap(err, "failed to get property reader")
-			return false
+		// Advance before processing so a failed or empty row is never retried.
+		messageIterator.currentIndex++
+
+		var currentMessage *Message
+
+		for _, property := range row {
+			// We only return the message identifier in GetMessageTableContext,
+			// so we don't need to check the property ID here.
+			propertyReader, err := messageIterator.messageTableContext.GetPropertyReader(property)
+
+			if err != nil {
+				return false, eris.Wrap(err, "failed to get property reader")
+			}
+
+			messageIdentifier, err := propertyReader.GetInteger32()
+
+			if err != nil {
+				return false, eris.Wrap(err, "failed to get message identifier")
+			}
+
+			message, err := messageIterator.file.GetMessage(Identifier(messageIdentifier))
+
+			if err != nil {
+				return false, eris.Wrapf(err, "failed to find message: %d", messageIdentifier)
+			}
+
+			currentMessage = message
 		}
 
-		messageIdentifier, err := propertyReader.GetInteger32()
-
-		if err != nil {
-			messageIterator.err = eris.Wrap(err, "failed to get message identifier")
-			return false
+		if currentMessage == nil {
+			// Malformed/empty row produced no message — skip it, never yield nil.
+			continue
 		}
 
-		message, err := messageIterator.file.GetMessage(Identifier(messageIdentifier))
+		messageIterator.currentMessage = currentMessage
 
-		if err != nil {
-			messageIterator.err = eris.Wrapf(err, "failed to find message: %d", messageIdentifier)
-			return false
-		}
-
-		currentMessage = message
+		return true, nil
 	}
 
-	messageIterator.currentIndex++
-	messageIterator.currentMessage = currentMessage
-
-	return true
+	return false, nil
 }
 
 // Value returns the current value in the iterator.
@@ -202,7 +221,16 @@ func (folder *Folder) GetAllMessages() ([]*Message, error) {
 }
 
 // GetMessage returns the message of the identifier.
+//
+// A malformed message returns an error (including a recovered panic from the
+// decode paths) rather than crashing the caller.
 func (file *File) GetMessage(identifier Identifier) (*Message, error) {
+	return guard("GetMessage", func() (*Message, error) {
+		return file.getMessage(identifier)
+	})
+}
+
+func (file *File) getMessage(identifier Identifier) (*Message, error) {
 	if identifier.GetType() != IdentifierTypeNormalMessage {
 		return nil, ErrMessageIdentifierTypeInvalid
 	}
@@ -269,9 +297,17 @@ func (file *File) GetMessage(identifier Identifier) (*Message, error) {
 
 // GetBodyRTF return the RTF body, may be
 func (message *Message) GetBodyRTF() (string, error) {
+	return guard("GetBodyRTF", message.getBodyRTF)
+}
+
+func (message *Message) getBodyRTF() (string, error) {
 	rtfPropertyReader, err := message.PropertyContext.GetPropertyReader(4105, message.LocalDescriptors)
 
 	if err != nil {
+		return "", err
+	}
+
+	if err := message.File.checkAllocSize(rtfPropertyReader.Size()); err != nil {
 		return "", err
 	}
 
@@ -296,6 +332,10 @@ func (message *Message) GetBodyRTF() (string, error) {
 // present. Returns the underlying ErrPropertyNotFound (from GetPropertyReader)
 // when the message carries no HTML body.
 func (message *Message) GetBodyHTML() (string, error) {
+	return guard("GetBodyHTML", message.getBodyHTML)
+}
+
+func (message *Message) getBodyHTML() (string, error) {
 	reader, err := message.PropertyContext.GetPropertyReader(4115, message.LocalDescriptors)
 
 	if err != nil {
@@ -315,6 +355,10 @@ func (message *Message) GetBodyHTML() (string, error) {
 		// UTF-8 when valid (the common case); otherwise decode using the message's
 		// declared internet code page, then Windows-1252, rather than emit invalid
 		// UTF-8 or drop the body on an unknown code page.
+		if err := message.File.checkAllocSize(reader.Size()); err != nil {
+			return "", err
+		}
+
 		data := make([]byte, reader.Size())
 
 		if _, err := reader.ReadAt(data, 0); err != nil {

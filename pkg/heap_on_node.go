@@ -95,7 +95,19 @@ func (file *File) GetHeapOnNode(btreeNode BTreeNode) (*HeapOnNode, error) {
 			return nil, ErrTotalBlocksSizeMismatch
 		}
 
+		// A Heap-on-Node's data lives in the file, so its total size can't exceed
+		// the archive. Enforcing this here caps every reader's Size(), which in turn
+		// bounds the property/row/key counts derived from it downstream — a forged
+		// XBlock can't inflate a size field into a multi-gigabyte allocation.
+		if err := file.checkAllocSize(int64(blockReaderTotalSize)); err != nil {
+			return nil, eris.Wrap(err, "implausible Heap-on-Node size")
+		}
+
 		return &HeapOnNode{Reader: NewHeapOnNodeReader(file.EncryptionType, blockReaders...)}, nil
+	}
+
+	if err := file.checkAllocSize(int64(btreeNode.Size)); err != nil {
+		return nil, eris.Wrap(err, "implausible Heap-on-Node block size")
 	}
 
 	return &HeapOnNode{Reader: NewHeapOnNodeReader(file.EncryptionType, *io.NewSectionReader(file.Reader, btreeNode.FileOffset, int64(btreeNode.Size)))}, nil

@@ -108,6 +108,12 @@ func (message *Message) GetAttachmentCount() (int, error) {
 
 // GetAttachment returns the specified attachment.
 func (message *Message) GetAttachment(attachmentIndex int) (*Attachment, error) {
+	return guard("Message.GetAttachment", func() (*Attachment, error) {
+		return message.getAttachment(attachmentIndex)
+	})
+}
+
+func (message *Message) getAttachment(attachmentIndex int) (*Attachment, error) {
 	attachmentsTableContext, err := message.GetAttachmentTableContext()
 
 	if err != nil {
@@ -179,6 +185,12 @@ func (message *Message) GetAttachment(attachmentIndex int) (*Attachment, error) 
 // GetAttachment returns the attachment.
 // Note that the properties aren't populated (call PropertyContext.Populate).
 func (file *File) GetAttachment(messageIdentifier Identifier) (*Attachment, error) {
+	return guard("File.GetAttachment", func() (*Attachment, error) {
+		return file.getAttachment(messageIdentifier)
+	})
+}
+
+func (file *File) getAttachment(messageIdentifier Identifier) (*Attachment, error) {
 	attachmentsNode, err := file.GetNodeBTreeNode(messageIdentifier)
 
 	if err != nil {
@@ -311,7 +323,16 @@ func (message *Message) GetAttachmentIterator() (AttachmentIterator, error) {
 }
 
 // WriteTo writes the attachment to the specified io.Writer.
+//
+// A malformed attachment returns an error (including a recovered panic from the
+// decode paths) rather than crashing the caller.
 func (attachment *Attachment) WriteTo(writer io.Writer) (int64, error) {
+	return guard("Attachment.WriteTo", func() (int64, error) {
+		return attachment.writeTo(writer)
+	})
+}
+
+func (attachment *Attachment) writeTo(writer io.Writer) (int64, error) {
 	attachmentReader, err := attachment.PropertyContext.GetPropertyReader(14081, attachment.LocalDescriptors)
 
 	if eris.Is(err, ErrPropertyNoData) {
