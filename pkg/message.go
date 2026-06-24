@@ -18,10 +18,8 @@ package pst
 
 import (
 	_ "embed"
-	"fmt"
 	"unicode/utf8"
 
-	"github.com/mooijtech/go-pst/v6/pkg/properties"
 	"github.com/pkg/errors"
 	"github.com/rotisserie/eris"
 	"github.com/tinylib/msgp/msgp"
@@ -35,6 +33,15 @@ type Message struct {
 	AttachmentTableContext *TableContext
 	LocalDescriptors       []LocalDescriptor // Used by the PropertyContext and TableContext.
 	Properties             msgp.Decodable    // Type properties.Message, properties.Appointment, properties.Contact
+
+	// Class is the raw PidTagMessageClass (0x001A), e.g. "IPM.Note" or
+	// "IPM.Contact.SBE". Empty when the property is absent or unreadable.
+	Class string
+	// Kind is the message family derived from Class by the classification
+	// router (see ClassifyKind). It lets a consumer branch on the message type
+	// without re-reading the class property or type-switching on Properties.
+	// An unrecognized class is KindUnknown, never silently KindMail.
+	Kind MessageKind
 }
 
 // GetMessageTableContext returns the message table context of this folder which contains references to all messages.
@@ -223,41 +230,20 @@ func (file *File) GetMessage(identifier Identifier) (*Message, error) {
 		return nil, eris.Wrap(err, "failed to get property context")
 	}
 
-	var messageProperties msgp.Decodable
+	// Read PidTagMessageClass (0x001A). An absent or unreadable class leaves
+	// messageClass "", which classify() treats conservatively as KindMail —
+	// rather than printing to stdout and guessing, as the library did before.
+	// https://learn.microsoft.com/en-us/office/vba/outlook/concepts/forms/item-types-and-message-classes
+	messageClass := ""
 
-	messageClassPropertyReader, err := propertyContext.GetPropertyReader(26, localDescriptors)
-
-	if err != nil {
-		fmt.Printf("Failed to get message class property reader, falling back to properties.Message: %+v\n", eris.New(err.Error()))
-		messageProperties = &properties.Message{}
-	} else {
-		messageClass, err := messageClassPropertyReader.GetStringValue()
-
-		if err != nil {
-			fmt.Printf("Failed to get message class, falling back to properties.Message: %+v\n", eris.New(err.Error()))
-			messageProperties = &properties.Message{}
-		} else {
-			// https://learn.microsoft.com/en-us/office/vba/outlook/concepts/forms/item-types-and-message-classes
-			if messageClass == "IPM.Note" || messageClass == "IPM.Note.SMIME.MultipartSigned" {
-				messageProperties = &properties.Message{}
-			} else if messageClass == "IPM.Appointment" || messageClass == "IPM.Schedule.Meeting" || messageClass == "IPM.Schedule.Meeting.Request" || messageClass == "IPM.OLE.CLASS.{00061055-0000-0000-C000-000000000046}" {
-				messageProperties = &properties.Appointment{}
-			} else if messageClass == "IPM.Contact" || messageClass == "IPM.AbchPerson" {
-				messageProperties = &properties.Contact{}
-			} else if messageClass == "IPM.Task" {
-				messageProperties = &properties.Task{}
-			} else if messageClass == "IPM.Activity" {
-				messageProperties = &properties.Journal{}
-			} else if messageClass == "IPM.Post.Rss" {
-				messageProperties = &properties.RSS{}
-			} else if messageClass == "IPM.DistList" {
-				messageProperties = &properties.AddressBook{}
-			} else {
-				fmt.Printf("Unmapped message class \"%s\", falling back to properties.Message...\n", messageClass)
-				messageProperties = &properties.Message{}
-			}
+	if reader, err := propertyContext.GetPropertyReader(26, localDescriptors); err == nil {
+		if value, err := reader.GetStringValue(); err == nil {
+			messageClass = value
 		}
 	}
+
+	messageKind, newProps := classify(messageClass)
+	messageProperties := newProps()
 
 	if err := propertyContext.Populate(messageProperties, localDescriptors); err != nil {
 		return nil, eris.Wrap(err, "failed to populate message properties")
@@ -269,6 +255,8 @@ func (file *File) GetMessage(identifier Identifier) (*Message, error) {
 		PropertyContext:  propertyContext,
 		LocalDescriptors: localDescriptors,
 		Properties:       messageProperties,
+		Class:            messageClass,
+		Kind:             messageKind,
 	}, nil
 }
 
