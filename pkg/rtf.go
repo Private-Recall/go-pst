@@ -40,6 +40,10 @@ var (
 )
 
 func (rtfDecoder *RTFDecoder) Decode(data []byte) (string, error) {
+	if len(data) < 16 {
+		return "", errors.New("RTF stream is shorter than its 16-byte header")
+	}
+
 	_ = binary.LittleEndian.Uint32(data[:4]) // Compressed size
 	uncompressedSize := int(binary.LittleEndian.Uint32(data[4:8]))
 	compressionSignature := data[8:12]
@@ -47,6 +51,18 @@ func (rtfDecoder *RTFDecoder) Decode(data []byte) (string, error) {
 
 	if bytes.Equal(compressionSignature, CompressionTypeCompressed) {
 		// Compressed
+		//
+		// Bound the declared uncompressed size against what the compressed stream
+		// could possibly produce. Each input byte expands to at most ~17 output
+		// bytes (a back-reference run), plus the preloaded dictionary, so a size
+		// field beyond that is malformed — reject it before allocating rather than
+		// letting a forged uint32 drive a multi-gigabyte make.
+		maxOutput := len(data)*17 + len(LZFUHeader) + 16
+
+		if uncompressedSize < 0 || uncompressedSize > maxOutput {
+			return "", errors.Errorf("RTF uncompressed size %d is implausible for a %d-byte stream", uncompressedSize, len(data))
+		}
+
 		outputBuffer := make([]byte, uncompressedSize)
 		outputPosition := 0
 		currentPosition := 16
