@@ -42,6 +42,13 @@ type Message struct {
 	// without re-reading the class property or type-switching on Properties.
 	// An unrecognized class is KindUnknown, never silently KindMail.
 	Kind MessageKind
+
+	// noUnkeyed makes Message impossible to build from outside the package with
+	// an unkeyed (positional) composite literal — `pst.Message{a, b, …}` becomes
+	// a compile error, while the keyed form `pst.Message{File: …}` keeps working.
+	// Message is only ever returned by GetMessage, so this costs callers nothing
+	// and lets future fields be added without breaking them. Never read/written.
+	noUnkeyed struct{}
 }
 
 // GetMessageTableContext returns the message table context of this folder which contains references to all messages.
