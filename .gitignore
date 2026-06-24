@@ -3,3 +3,6 @@
 protoc
 protoc-gen-go
 protoc-go-inject-tag
+
+# Attachments extracted by pkg/doc_test.go
+/pkg/attachments/
