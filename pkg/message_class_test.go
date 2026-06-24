@@ -61,7 +61,10 @@ func TestClassifyKind(t *testing.T) {
 		// family prefix, so it is Unknown even though "Schedule" appears later.
 		{"IPM.Microsoft.Schedule.Whatever", KindUnknown},
 		{"IPM.Microsoft.WunderBar", KindUnknown},
-		{"IPM.OLE.CLASS.{00061055-0000-0000-C000-000000000046}", KindUnknown},
+		// The recurring-appointment OLE class keeps its upstream Appointment
+		// mapping (back-compat); other IPM.OLE.* fall through to Unknown.
+		{"IPM.OLE.CLASS.{00061055-0000-0000-C000-000000000046}", KindAppointment},
+		{"IPM.OLE.CLASS.{deadbeef}", KindUnknown},
 		{"IPM.JetForm.Something", KindUnknown},
 		{"IPM.Document", KindUnknown},
 		{"Totally.Bogus", KindUnknown},

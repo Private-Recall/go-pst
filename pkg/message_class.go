@@ -104,6 +104,11 @@ func newNoteProps() msgp.Decodable        { return &properties.Note{} }
 // IPM.InfoPathForm.* — are deliberately NOT listed: they fall through to
 // KindUnknown (a generic item), never to KindMail.
 var classRules = []classRule{
+	// Recurring-appointment OLE class — a specific GUID upstream mapped to
+	// Appointment. Kept as a first-class rule (above the general ipm.ole fall-
+	// through to KindUnknown) so upgrading from upstream doesn't silently change
+	// this item's type. More specific than "ipm.ole", so it must precede it.
+	{"ipm.ole.class.{00061055-0000-0000-c000-000000000046}", KindAppointment, newAppointmentProps},
 	{"ipm.schedule.meeting", KindAppointment, newAppointmentProps},
 	{"ipm.schedule", KindAppointment, newAppointmentProps},
 	{"ipm.appointment", KindAppointment, newAppointmentProps},
