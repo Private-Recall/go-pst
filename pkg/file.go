@@ -33,6 +33,15 @@ type File struct {
 	BlockBTree     BTreeStore
 	NameToIDMap    *NameToIDMap
 	Size           int64 // Total file size in bytes (0 if unknown); the hard upper bound on any single value allocation.
+
+	// WalkErrors records b-tree subtrees that could not be read when the
+	// file was opened (partial damage; each entry is a *BTreeWalkError).
+	// The b-tree stores hold everything that WAS readable, so folder and
+	// message iteration silently skips whatever lived under the damaged
+	// subtrees. Callers that care about completeness — ingest pipelines —
+	// must check this and surface it, not treat a successful open as a
+	// whole archive. See private-recall/recall#1752.
+	WalkErrors []error
 }
 
 // Reader defines the file reader used by go-pst to support asynchronous I/O.
@@ -105,6 +114,15 @@ func NewFromReaderWithBTrees(reader Reader, nodeBTree BTreeStore, blockBTree BTr
 
 	pstFile.EncryptionType = encryptionType
 
+	// A walk error with an EMPTY store means the tree is unreachable (the
+	// classic case: the header points at blank root pages — see
+	// BTreePageTypeError) and the file is unusable: fail loudly and
+	// actionably. A walk error with a non-empty store is partial damage:
+	// keep the readable subset and record the error on WalkErrors for
+	// completeness-sensitive callers. (Both walk calls previously discarded
+	// their outcome entirely — the checks below them re-tested a stale err
+	// — so damage of either kind opened "successfully" and surfaced later
+	// as a cryptic b-tree lookup miss, or not at all.)
 	if pstFile.NodeBTree.Len() == 0 {
 		nodeBTreeOffset, err := pstFile.GetNodeBTreeOffset()
 
@@ -112,10 +130,11 @@ func NewFromReaderWithBTrees(reader Reader, nodeBTree BTreeStore, blockBTree BTr
 			return nil, err
 		}
 
-		pstFile.WalkAndCreateBTree(nodeBTreeOffset, BTreeTypeNode, pstFile.NodeBTree)
-
-		if err != nil {
-			return nil, err
+		if walkErr := pstFile.WalkAndCreateBTree(nodeBTreeOffset, BTreeTypeNode, pstFile.NodeBTree); walkErr != nil {
+			if pstFile.NodeBTree.Len() == 0 {
+				return nil, eris.Wrap(walkErr, "node b-tree is unreadable")
+			}
+			pstFile.WalkErrors = append(pstFile.WalkErrors, walkErr)
 		}
 	}
 
@@ -126,10 +145,11 @@ func NewFromReaderWithBTrees(reader Reader, nodeBTree BTreeStore, blockBTree BTr
 			return nil, err
 		}
 
-		pstFile.WalkAndCreateBTree(blockBTreeOffset, BTreeTypeBlock, pstFile.BlockBTree)
-
-		if err != nil {
-			return nil, err
+		if walkErr := pstFile.WalkAndCreateBTree(blockBTreeOffset, BTreeTypeBlock, pstFile.BlockBTree); walkErr != nil {
+			if pstFile.BlockBTree.Len() == 0 {
+				return nil, eris.Wrap(walkErr, "block b-tree is unreadable")
+			}
+			pstFile.WalkErrors = append(pstFile.WalkErrors, walkErr)
 		}
 	}
 
