@@ -18,6 +18,7 @@ package pst
 
 import (
 	"encoding/binary"
+	"fmt"
 	"github.com/pkg/errors"
 	"github.com/rotisserie/eris"
 	"io"
@@ -188,10 +189,19 @@ func (file *File) GetBTreeNodeEntries(btreeNodeOffset int64, btreeType BTreeType
 
 	if err != nil {
 		callback(nil, 0, errors.WithStack(err))
+		return
 	}
 
 	file.GetBTreeNodeRawEntries(btreeNodeOffset, func(btreeNodeEntry []byte, err error) {
 		if err != nil {
+			callback(nil, 0, err)
+			return
+		}
+
+		// A page whose trailer doesn't identify it as a page of this b-tree
+		// is damage (a blank page, or a header pointing at something else) —
+		// report it instead of parsing garbage as entries.
+		if err := file.validateBTreePage(btreeNodeEntry, btreeType, btreeNodeOffset); err != nil {
 			callback(nil, 0, err)
 			return
 		}
@@ -394,25 +404,174 @@ func (file *File) GetParentBTreeNodeLevel(btreeNodeOffset int64) (uint8, error) 
 	return outputBuffer[0], nil
 }
 
+// pageTypeNBT and pageTypeBBT are the PAGETRAILER ptype values identifying
+// node and block b-tree pages. References [MS-PST] "PAGETRAILER".
+const (
+	pageTypeNBT byte = 0x81
+	pageTypeBBT byte = 0x80
+)
+
+// BTreePageTypeError reports a page referenced as part of a b-tree whose
+// trailer does not identify it as one. The archetypal case is an all-zero
+// page (Got == 0): the header points at a b-tree root that was never
+// flushed — Outlook crashed between the header write and the page write —
+// so the whole tree is unreachable even though the data blocks usually
+// still exist. Outlook's scanpst.exe rebuilds exactly this damage.
+type BTreePageTypeError struct {
+	Offset int64
+	Got    byte
+	Want   byte
+}
+
+func (e *BTreePageTypeError) Error() string {
+	if e.Got == 0 {
+		return fmt.Sprintf("go-pst: b-tree page at offset %d is blank (page type 0x00, want 0x%02x): the file is damaged (Outlook's scanpst.exe can usually rebuild it)", e.Offset, e.Want)
+	}
+	return fmt.Sprintf("go-pst: page at offset %d is not a b-tree page (page type 0x%02x, want 0x%02x): the file is damaged (Outlook's scanpst.exe can usually rebuild it)", e.Offset, e.Got, e.Want)
+}
+
+// validateBTreePage checks that a raw b-tree page's trailer identifies it as
+// a page of the expected b-tree and that its declared entry table fits the
+// page's entry region. Both checks catch damage the entry parser would
+// otherwise misread as (or crash on) entries. The Unicode4k trailer is not
+// modeled (GetBTreeNodeRawEntries doesn't even read those bytes), so 4k
+// pages skip validation rather than fail it.
+func (file *File) validateBTreePage(page []byte, btreeType BTreeType, offset int64) error {
+	var ptypeOffset, entryRegion int
+
+	switch file.FormatType {
+	case FormatTypeUnicode:
+		ptypeOffset, entryRegion = 496, 488
+	case FormatTypeANSI:
+		ptypeOffset, entryRegion = 500, 496
+	default:
+		return nil
+	}
+
+	want := pageTypeNBT
+	if btreeType == BTreeTypeBlock {
+		want = pageTypeBBT
+	}
+
+	if got := page[ptypeOffset]; got != want {
+		return errors.WithStack(&BTreePageTypeError{Offset: offset, Got: got, Want: want})
+	}
+
+	entryCount := int(file.GetBTreeNodeEntryCount(page))
+	entrySize := int(file.GetBTreeNodeEntrySize(page))
+
+	if entryCount > 0 && (entrySize == 0 || entryCount*entrySize > entryRegion) {
+		return errors.WithStack(fmt.Errorf("go-pst: b-tree page at offset %d declares %d entries of %d bytes, exceeding the %d-byte entry region: the file is damaged", offset, entryCount, entrySize, entryRegion))
+	}
+
+	return nil
+}
+
+// maxBTreeDepth bounds the b-tree walk recursion. Real PST trees are 3-4
+// levels; anything deeper is a corrupt or malicious file cycling through
+// branch pages.
+const maxBTreeDepth = 64
+
+// BTreeWalkError aggregates what a b-tree walk could not read. The walk
+// salvages: a failed subtree is reported here while its siblings still
+// load, so the store holds every reachable entry. Callers deciding whether
+// the file is usable should combine this with the store's Len — a non-empty
+// store plus a BTreeWalkError means PARTIAL coverage (some folders/messages
+// silently unreachable), which completeness-sensitive callers (ingest
+// pipelines) must surface rather than swallow.
+type BTreeWalkError struct {
+	// FailureCount is how many subtree reads failed; Failures keeps the
+	// first few for diagnosis.
+	FailureCount int
+	Failures     []error
+	// Conflicts is how many entries were skipped because an entry with the
+	// same identity was already in the store (duplicate entries are
+	// corruption; the first-loaded entry wins).
+	Conflicts int
+}
+
+func (e *BTreeWalkError) Error() string {
+	msg := fmt.Sprintf("go-pst: b-tree walk: %d unreadable subtree(s), %d duplicate entrie(s)", e.FailureCount, e.Conflicts)
+	if len(e.Failures) > 0 {
+		msg += ": " + e.Failures[0].Error()
+	}
+	return msg
+}
+
+// Unwrap exposes the recorded failures to errors.Is/As.
+func (e *BTreeWalkError) Unwrap() []error { return e.Failures }
+
+// maxRecordedWalkFailures caps BTreeWalkError.Failures so a massively
+// corrupt file doesn't accumulate unbounded error values; FailureCount
+// still counts them all.
+const maxRecordedWalkFailures = 8
+
 // WalkAndCreateBTree walks the b-tree and updates the given b-tree store.
-func (file *File) WalkAndCreateBTree(btreeOffset int64, btreeType BTreeType, btreeStore BTreeStore) {
-	file.GetBTreeNodeEntries(btreeOffset, btreeType, func(nodeEntries []BTreeNode, nodeLevel uint8, err error) {
+//
+// The walk is salvaging: an unreadable or invalid page fails only its own
+// subtree, siblings still load. It returns nil when the whole tree loaded,
+// or a *BTreeWalkError describing what was skipped. (It previously returned
+// nothing and silently dropped unreadable subtrees — a partially damaged
+// archive iterated as if whole, with the unreachable mail silently absent;
+// see private-recall/recall#1752.)
+func (file *File) WalkAndCreateBTree(btreeOffset int64, btreeType BTreeType, btreeStore BTreeStore) error {
+	walk := &btreeWalk{file: file, btreeType: btreeType, store: btreeStore}
+	walk.walk(btreeOffset, 0)
+
+	if walk.err.FailureCount == 0 && walk.err.Conflicts == 0 {
+		return nil
+	}
+	return &walk.err
+}
+
+// btreeWalk carries one WalkAndCreateBTree traversal's state.
+type btreeWalk struct {
+	file      *File
+	btreeType BTreeType
+	store     BTreeStore
+	err       BTreeWalkError
+}
+
+func (w *btreeWalk) fail(err error) {
+	w.err.FailureCount++
+	if len(w.err.Failures) < maxRecordedWalkFailures {
+		w.err.Failures = append(w.err.Failures, err)
+	}
+}
+
+func (w *btreeWalk) walk(offset int64, depth int) {
+	if depth > maxBTreeDepth {
+		w.fail(fmt.Errorf("go-pst: b-tree deeper than %d levels at offset %d: corrupt tree", maxBTreeDepth, offset))
+		return
+	}
+
+	w.file.GetBTreeNodeEntries(offset, w.btreeType, func(nodeEntries []BTreeNode, nodeLevel uint8, err error) {
+		if err != nil {
+			w.fail(err)
+			return
+		}
+
 		if nodeLevel > 0 {
 			// Branch node entries.
 			for i := 0; i < len(nodeEntries); i++ {
 				nodeEntry := nodeEntries[i]
 
-				if _, exists := btreeStore.Load(nodeEntry); exists {
-					panic(errors.WithStack(ErrBTreeNodeConflict))
+				if _, exists := w.store.Load(nodeEntry); exists {
+					w.err.Conflicts++
+					continue
+				}
+				if nodeEntry.FileOffset <= 0 || (w.file.Size > 0 && nodeEntry.FileOffset >= w.file.Size) {
+					w.fail(fmt.Errorf("go-pst: b-tree branch entry %d points outside the file (offset %d, file size %d)", nodeEntry.Identifier, nodeEntry.FileOffset, w.file.Size))
+					continue
 				}
 
-				file.WalkAndCreateBTree(nodeEntry.FileOffset, btreeType, btreeStore)
+				w.walk(nodeEntry.FileOffset, depth+1)
 			}
 		} else {
 			// Leaf node entries
 			for i := 0; i < len(nodeEntries); i++ {
-				if _, exists := btreeStore.Load(nodeEntries[i]); exists {
-					panic(errors.WithStack(ErrBTreeNodeConflict))
+				if _, exists := w.store.Load(nodeEntries[i]); exists {
+					w.err.Conflicts++
 				}
 			}
 		}
