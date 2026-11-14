@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "recall-code": {
+      "command": "recall-code",
+      "args": ["mcp"]
+    }
+  }
+}
